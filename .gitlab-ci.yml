@@ -1,0 +1,80 @@
+variables:
+  DOCKER_IMAGE: "college_app"
+
+stages:
+  - sonarqube-check
+  - build
+  - push
+  - deploy
+
+  # 1 - Chech the code via Sonaqube
+sonarqube-check:
+  stage: sonarqube-check
+  image: 
+    name: sonarsource/sonar-scanner-cli:latest
+    entrypoint: [""]
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"  # Defines the location of the analysis task cache
+    GIT_DEPTH: "0"  # Tells git to fetch all the branches of the project, required by the analysis task
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+  script: 
+    - sonar-scanner
+  allow_failure: true
+  only:
+    - main
+
+  # 2 - Build a new image based on the new code
+build:
+  stage: build
+  image: docker:latest # Image contains the Docker CLI tools
+  services:
+    - docker:dind # In a GitLab CI pipeline, the jobs are run inside containers. 
+                  # If your CI job needs to build or run Docker containers, you need access to a Docker daemon => avem Docker in jobul rulat in pipeline
+  script:
+    - echo "Building Docker Image"
+    - docker build -t $DOCKER_IMAGE .
+    - docker save -o docker_image.tar $DOCKER_IMAGE # save a Docker image as a .tar archive file
+  artifacts:
+    paths:
+      - docker_image.tar
+  only:
+    - main # only when there are changes pushed to the main branch
+
+  # 3 - The created image will be uploaded on Dockerhub
+push:
+  stage: push
+  image: docker:latest
+  services:
+    - docker:dind
+  dependencies:
+    - build # Use the artifact from 'build' stage
+  script:
+    - echo "Login to Dockerhub"
+    - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+
+    - echo "Loading Docker Image"
+    - docker load -i docker_image.tar
+
+    - echo "Tagging Docker Image"
+    - docker tag $DOCKER_IMAGE $DOCKER_USERNAME/$DOCKER_IMAGE
+
+    - echo "Pushing Docker Image"
+    - docker push $DOCKER_USERNAME/$DOCKER_IMAGE
+
+  only:
+    - main
+
+  # For deploying the new image in our 'Deployment', we need to connect to our Master Node from EC2 running Cluster => in this case using 'gitlab-runner'
+
+deploy:
+  stage: deploy
+  script:
+    - echo "Deploy to Kubernetes Cluster using Helm-Chart"
+    - helm upgrade collegeapp ./helm-chart --set image.repository=$DOCKER_USERNAME/$DOCKER_IMAGE --set image.tag=latest
+  tags:
+    - master-runner
+  only:
+    - main
